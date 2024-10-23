@@ -6,25 +6,6 @@ import pygame
 import sys
 import random
 
-CONST = 0.5
-
-
-class SleepWait:
-    def __init__(self, wait_time=1):
-        self.wait_time = wait_time
-
-    def __enter__(self):
-        random_wait = self.wait_time + random.uniform(
-            -self.wait_time * CONST, self.wait_time * CONST
-        )
-        time.sleep(random_wait)
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        random_wait = self.wait_time + random.uniform(
-            -self.wait_time * CONST, self.wait_time * CONST
-        )
-        time.sleep(random_wait)
-
 
 class Logger:
     def __init__(self, status_queue, process_name, activity):
@@ -34,21 +15,6 @@ class Logger:
 
     def log_status(self, status):
         self.status_queue.put((self.process_name, self.activity, status))
-
-
-class LogStatus:
-    def __init__(self, logger, msg=None):
-        self.logger = logger
-        self.msg = msg
-
-    def __enter__(self):
-        if self.msg:
-            self.logger.log_status(f"on ({self.msg})")
-        else:
-            self.logger.log_status("on")
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.logger.log_status("off")
 
 
 class ThinkingThread(threading.Thread):
@@ -75,16 +41,16 @@ class ThinkingThread(threading.Thread):
             self.think()
 
     def think(self):
-        with LogStatus(self.logger, msg=f"{len(self.thoughts)}"):
-            time.sleep((2 + len(self.thoughts)) * self.mult)
-
-        with SleepWait(self.mult):
-            for thought in self.thoughts:
-                self.mouth_queue.put(thought)
-            if random.random() < self.thinking_probability:
-                self_thought = f"Thought generated during thinking at "
-                self.brain_queue.put(self_thought)
         self._collect_messages()
+
+        for thought in self.thoughts:
+            self.mouth_queue.put(thought)
+            self.logger.log_status("message_sent")
+
+        if random.random() < self.thinking_probability:
+            self_thought = f"Thought generated during thinking"
+            self.brain_queue.put(self_thought)
+            self.logger.log_status("message_generated")
 
     def _collect_messages(self):
         self.thoughts = []
@@ -92,6 +58,7 @@ class ThinkingThread(threading.Thread):
             try:
                 received_message = self.brain_queue.get_nowait()
                 self.thoughts.append(received_message)
+                self.logger.log_status("message_received")
             except queue.Empty:
                 break
 
@@ -106,7 +73,6 @@ class TalkingThread(threading.Thread):
         stop_event,
         process_name,
         mult,
-        lock,
     ):
         super().__init__()
         self.other_ear_conn = pipe
@@ -116,11 +82,12 @@ class TalkingThread(threading.Thread):
         self.stop_event = stop_event
         self.mult = mult
         self.thinking_probability = 0.1
-        self.lock = lock
-        self.process_name = process_name
+        self.talking_probability = 0.5
 
     def run(self):
         while not self.stop_event.is_set():
+            if random.random() < self.talking_probability:
+                self.talk("bla")
             try:
                 message = self.mouth_queue.get(timeout=1)
                 self.talk(message)
@@ -128,30 +95,17 @@ class TalkingThread(threading.Thread):
                 pass
 
     def talk(self, message):
-        if self.lock.acquire(block=False):
-            try:
-                with LogStatus(self.logger):
-                    with SleepWait(self.mult):
-                        if random.random() < self.thinking_probability:
-                            self_thought = f"Thought generated during talking at "
-                            self.brain_queue.put(self_thought)
-                        self.other_ear_conn.send(message)
-            finally:
-                self.lock.release()
-        else:
-            # Cannot acquire lock, other process is talking
-            pass
+        if random.random() < self.thinking_probability:
+            self_thought = f"Thought generated during talking"
+            self.brain_queue.put(self_thought)
+            self.logger.log_status("message_generated")
+        self.other_ear_conn.send(message)
+        self.logger.log_status("message_sent")
 
 
 class ListeningThread(threading.Thread):
     def __init__(
-        self,
-        other_conn,
-        status_queue,
-        stop_event,
-        brain_queue,
-        process_name,
-        mult,
+        self, other_conn, status_queue, stop_event, brain_queue, process_name, mult
     ):
         super().__init__()
         self.ear_conn = other_conn
@@ -166,34 +120,21 @@ class ListeningThread(threading.Thread):
 
     def listen(self):
         if self.ear_conn.poll():
-            with LogStatus(self.logger):
-                with SleepWait(self.mult):
-                    message = self.ear_conn.recv()
-                self.brain_queue.put(message)
+            message = self.ear_conn.recv()
+            self.brain_queue.put(message)
+            self.logger.log_status("message_received")
 
 
-def process_function(conn, other_conn, status_queue, process_name, mult, lock):
+def process_function(conn, other_conn, status_queue, process_name, mult):
     mouth_queue = queue.Queue()
     brain_queue = queue.Queue()
     stop_event = threading.Event()
 
     thinker = ThinkingThread(
-        mouth_queue,
-        status_queue,
-        stop_event,
-        brain_queue,
-        process_name,
-        mult,
+        mouth_queue, status_queue, stop_event, brain_queue, process_name, mult
     )
     talker = TalkingThread(
-        conn,
-        mouth_queue,
-        brain_queue,
-        status_queue,
-        stop_event,
-        process_name,
-        mult,
-        lock,
+        conn, mouth_queue, brain_queue, status_queue, stop_event, process_name, mult
     )
     listener = ListeningThread(
         other_conn, status_queue, stop_event, brain_queue, process_name, mult
@@ -213,25 +154,62 @@ if __name__ == "__main__":
     parent_conn1, child_conn1 = multiprocessing.Pipe()
     parent_conn2, child_conn2 = multiprocessing.Pipe()
     status_queue = multiprocessing.Queue()
-    lock = multiprocessing.Lock()  # Shared lock between processes
 
     process1 = multiprocessing.Process(
         target=process_function,
-        args=(parent_conn1, child_conn2, status_queue, "Process1", mult, lock),
+        args=(parent_conn1, child_conn2, status_queue, "Process1", mult),
         name="Process1",
     )
     process1.start()
 
     process2 = multiprocessing.Process(
         target=process_function,
-        args=(parent_conn2, child_conn1, status_queue, "Process2", mult, lock),
+        args=(parent_conn2, child_conn1, status_queue, "Process2", mult),
         name="Process2",
     )
     process2.start()
 
     statuses = {
-        "Process1": {"thinking": "off", "talking": "off", "listening": "off"},
-        "Process2": {"thinking": "off", "talking": "off", "listening": "off"},
+        "Process1": {
+            "thinking": {
+                "count": 0,
+                "last_update": time.time(),
+                "reset_time": time.time(),
+                "messages_per_second": 0,
+            },
+            "talking": {
+                "count": 0,
+                "last_update": time.time(),
+                "reset_time": time.time(),
+                "messages_per_second": 0,
+            },
+            "listening": {
+                "count": 0,
+                "last_update": time.time(),
+                "reset_time": time.time(),
+                "messages_per_second": 0,
+            },
+        },
+        "Process2": {
+            "thinking": {
+                "count": 0,
+                "last_update": time.time(),
+                "reset_time": time.time(),
+                "messages_per_second": 0,
+            },
+            "talking": {
+                "count": 0,
+                "last_update": time.time(),
+                "reset_time": time.time(),
+                "messages_per_second": 0,
+            },
+            "listening": {
+                "count": 0,
+                "last_update": time.time(),
+                "reset_time": time.time(),
+                "messages_per_second": 0,
+            },
+        },
     }
 
     pygame.init()
@@ -249,8 +227,22 @@ if __name__ == "__main__":
 
             try:
                 while True:
-                    process_name, activity, activity_status = status_queue.get_nowait()
-                    statuses[process_name][activity] = activity_status
+                    process_name, activity, status = status_queue.get_nowait()
+                    now = time.time()
+                    data = statuses[process_name][activity]
+                    if status in (
+                        "message_sent",
+                        "message_received",
+                        "message_generated",
+                    ):
+                        data["count"] += 1
+                        data["last_update"] = now
+
+                        if now - data["reset_time"] >= 1.0:
+                            elapsed = now - data["reset_time"]
+                            data["messages_per_second"] = data["count"] / elapsed
+                            data["count"] = 0
+                            data["reset_time"] = now
             except queue.Empty:
                 pass
 
@@ -267,8 +259,9 @@ if __name__ == "__main__":
                 screen.blit(text, (x, y))
                 y += 30
                 for activity in activities:
-                    status = statuses[process_name][activity]
-                    display_text = f"{activity}: {status}"
+                    data = statuses[process_name][activity]
+                    messages_per_second = data["messages_per_second"]
+                    display_text = f"{activity}: {messages_per_second:.2f} msg/s"
                     text = font.render(display_text, True, (0, 0, 0))
                     screen.blit(text, (x, y))
                     y += 30
