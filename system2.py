@@ -8,12 +8,12 @@ import random
 
 CONST = 0.5
 
+
 class SleepWait:
     def __init__(self, wait_time=1):
         self.wait_time = wait_time
 
     def __enter__(self):
-        # Add randomness to the wait time
         random_wait = self.wait_time + random.uniform(
             -self.wait_time * CONST, self.wait_time * CONST
         )
@@ -40,6 +40,7 @@ class LogStatus:
     def __init__(self, logger, msg=None):
         self.logger = logger
         self.msg = msg
+
     def __enter__(self):
         if self.msg:
             self.logger.log_status(f"on ({self.msg})")
@@ -51,7 +52,6 @@ class LogStatus:
 
 
 class ThinkingThread(threading.Thread):
-
     def __init__(
         self,
         mouth_queue,
@@ -78,7 +78,6 @@ class ThinkingThread(threading.Thread):
         with LogStatus(self.logger, msg=f"{len(self.thoughts)}"):
             time.sleep((2 + len(self.thoughts)) * self.mult)
 
-
         with SleepWait(self.mult):
             for thought in self.thoughts:
                 self.mouth_queue.put(thought)
@@ -98,7 +97,17 @@ class ThinkingThread(threading.Thread):
 
 
 class TalkingThread(threading.Thread):
-    def __init__(self, pipe, mouth_queue, brain_queue, status_queue, stop_event, process_name, mult):
+    def __init__(
+        self,
+        pipe,
+        mouth_queue,
+        brain_queue,
+        status_queue,
+        stop_event,
+        process_name,
+        mult,
+        lock,
+    ):
         super().__init__()
         self.other_ear_conn = pipe
         self.mouth_queue = mouth_queue
@@ -107,7 +116,8 @@ class TalkingThread(threading.Thread):
         self.stop_event = stop_event
         self.mult = mult
         self.thinking_probability = 0.1
-        
+        self.lock = lock
+        self.process_name = process_name
 
     def run(self):
         while not self.stop_event.is_set():
@@ -118,16 +128,31 @@ class TalkingThread(threading.Thread):
                 pass
 
     def talk(self, message):
-        with LogStatus(self.logger):
-            with SleepWait(self.mult):
-                if random.random() < self.thinking_probability:
-                    self_thought = f"Thought generated during talking at "
-                    self.brain_queue.put(self_thought)
-                self.other_ear_conn.send(message)
+        if self.lock.acquire(block=False):
+            try:
+                with LogStatus(self.logger):
+                    with SleepWait(self.mult):
+                        if random.random() < self.thinking_probability:
+                            self_thought = f"Thought generated during talking at "
+                            self.brain_queue.put(self_thought)
+                        self.other_ear_conn.send(message)
+            finally:
+                self.lock.release()
+        else:
+            # Cannot acquire lock, other process is talking
+            pass
 
 
 class ListeningThread(threading.Thread):
-    def __init__(self, other_conn, status_queue, stop_event, brain_queue, process_name, mult):
+    def __init__(
+        self,
+        other_conn,
+        status_queue,
+        stop_event,
+        brain_queue,
+        process_name,
+        mult,
+    ):
         super().__init__()
         self.ear_conn = other_conn
         self.logger = Logger(status_queue, process_name, "listening")
@@ -147,14 +172,32 @@ class ListeningThread(threading.Thread):
                 self.brain_queue.put(message)
 
 
-def process_function(conn, other_conn, status_queue, process_name, mult):
+def process_function(conn, other_conn, status_queue, process_name, mult, lock):
     mouth_queue = queue.Queue()
     brain_queue = queue.Queue()
     stop_event = threading.Event()
 
-    thinker = ThinkingThread(mouth_queue, status_queue, stop_event, brain_queue, process_name, mult)
-    talker = TalkingThread(conn, mouth_queue, brain_queue, status_queue, stop_event, process_name, mult)
-    listener = ListeningThread(other_conn, status_queue, stop_event, brain_queue, process_name, mult)
+    thinker = ThinkingThread(
+        mouth_queue,
+        status_queue,
+        stop_event,
+        brain_queue,
+        process_name,
+        mult,
+    )
+    talker = TalkingThread(
+        conn,
+        mouth_queue,
+        brain_queue,
+        status_queue,
+        stop_event,
+        process_name,
+        mult,
+        lock,
+    )
+    listener = ListeningThread(
+        other_conn, status_queue, stop_event, brain_queue, process_name, mult
+    )
 
     thinker.start()
     talker.start()
@@ -170,17 +213,18 @@ if __name__ == "__main__":
     parent_conn1, child_conn1 = multiprocessing.Pipe()
     parent_conn2, child_conn2 = multiprocessing.Pipe()
     status_queue = multiprocessing.Queue()
+    lock = multiprocessing.Lock()  # Shared lock between processes
 
     process1 = multiprocessing.Process(
         target=process_function,
-        args=(parent_conn1, child_conn2, status_queue, "Process1", mult),
+        args=(parent_conn1, child_conn2, status_queue, "Process1", mult, lock),
         name="Process1",
     )
     process1.start()
 
     process2 = multiprocessing.Process(
         target=process_function,
-        args=(parent_conn2, child_conn1, status_queue, "Process2", mult),
+        args=(parent_conn2, child_conn1, status_queue, "Process2", mult, lock),
         name="Process2",
     )
     process2.start()
