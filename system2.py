@@ -84,11 +84,11 @@ class TalkingThread(threading.Thread):
         self.mult = mult
         self.thinking_probability = 0.1
         self.talking_probability = 0.5
-        self.interrupt_probability = 0.3  # Probability to interrupt
+        self.interrupt_probability = 0.05  # Probability to interrupt
         self.process_name = process_name
         self.shared_state = shared_state
-        self.min_talking_duration = 1  # Minimum talking duration in seconds
-        self.max_talking_duration = 5.0  # Maximum talking duration in seconds
+        self.min_talking_duration = 0.5  # Minimum talking duration in seconds
+        self.max_talking_duration = 2.0  # Maximum talking duration in seconds
 
     def run(self):
         while not self.stop_event.is_set():
@@ -112,28 +112,34 @@ class TalkingThread(threading.Thread):
                 # Decide to interrupt
                 pass  # Proceed to talk
             else:
+                time.sleep(0.2)
                 # Decide to yield
                 return
         else:
             # Other process is not talking
             pass  # Proceed to talk
 
-        # Indicate that this process is talking
-        self.shared_state[f"{self.process_name}_is_talking"] = True
+        # Indicate that this process intends to start talking
+        self.shared_state[f"{self.process_name}_wants_to_talk"] = True
 
         # Small delay to simulate potential collision
-        # time.sleep(0.0001)  # Sleep for 0.1 milliseconds
+        time.sleep(0.0001)  # Sleep for 0.1 milliseconds
 
-        # After setting is_talking, check again if both are talking
-        if self.shared_state.get(f"{other_process_name}_is_talking", False):
-            # Both started talking at the same time
-            if random.random() < 0.5:
+        # Collision detection: check if both processes want to talk
+        if self.shared_state.get(f"{other_process_name}_wants_to_talk", False):
+            # Both processes want to talk at the same time
+            if self.process_name > other_process_name:
                 # This process yields
-                self.shared_state[f"{self.process_name}_is_talking"] = False
+                self.shared_state[f"{self.process_name}_wants_to_talk"] = False
                 return
             else:
-                # Other process may yield
-                pass
+                # Other process yields
+                self.shared_state[f"{other_process_name}_wants_to_talk"] = False
+
+        # Proceed to talk
+        self.shared_state[f"{self.process_name}_is_talking"] = True
+        self.shared_state[f"{self.process_name}_wants_to_talk"] = False
+        self.logger.log_status("on")  # Log that the process has started talking
 
         # Generate random talking duration
         talking_duration = random.uniform(
@@ -153,7 +159,7 @@ class TalkingThread(threading.Thread):
             self.logger.log_status("message_sent")
 
             # Optional: sleep briefly to prevent tight loop (simulate natural speaking rate)
-            # time.sleep(0.0001)  # Sleep for 0.1 seconds
+            time.sleep(0.1)  # Sleep for 0.1 seconds
 
             # Check if stop_event is set to allow for graceful shutdown
             if self.stop_event.is_set():
@@ -161,6 +167,7 @@ class TalkingThread(threading.Thread):
 
         # Indicate that this process has finished talking
         self.shared_state[f"{self.process_name}_is_talking"] = False
+        self.logger.log_status("off")  # Log that the process has stopped talking
 
 
 class ListeningThread(threading.Thread):
@@ -231,6 +238,8 @@ if __name__ == "__main__":
     shared_state = manager.dict()
     shared_state["Process1_is_talking"] = False
     shared_state["Process2_is_talking"] = False
+    shared_state["Process1_wants_to_talk"] = False
+    shared_state["Process2_wants_to_talk"] = False
 
     process1 = multiprocessing.Process(
         target=process_function,
@@ -253,18 +262,21 @@ if __name__ == "__main__":
                 "last_update": time.time(),
                 "reset_time": time.time(),
                 "messages_per_second": 0,
+                "status": "off",
             },
             "talking": {
                 "count": 0,
                 "last_update": time.time(),
                 "reset_time": time.time(),
                 "messages_per_second": 0,
+                "status": "off",
             },
             "listening": {
                 "count": 0,
                 "last_update": time.time(),
                 "reset_time": time.time(),
                 "messages_per_second": 0,
+                "status": "off",
             },
         },
         "Process2": {
@@ -273,18 +285,21 @@ if __name__ == "__main__":
                 "last_update": time.time(),
                 "reset_time": time.time(),
                 "messages_per_second": 0,
+                "status": "off",
             },
             "talking": {
                 "count": 0,
                 "last_update": time.time(),
                 "reset_time": time.time(),
                 "messages_per_second": 0,
+                "status": "off",
             },
             "listening": {
                 "count": 0,
                 "last_update": time.time(),
                 "reset_time": time.time(),
                 "messages_per_second": 0,
+                "status": "off",
             },
         },
     }
@@ -307,7 +322,9 @@ if __name__ == "__main__":
                     process_name, activity, status = status_queue.get_nowait()
                     now = time.time()
                     data = statuses[process_name][activity]
-                    if status in (
+                    if status in ("on", "off"):
+                        data["status"] = status
+                    elif status in (
                         "message_sent",
                         "message_received",
                         "message_generated",
@@ -315,7 +332,7 @@ if __name__ == "__main__":
                         data["count"] += 1
                         data["last_update"] = now
 
-                        if now - data["reset_time"] >= .5:
+                        if now - data["reset_time"] >= 1.0:
                             elapsed = now - data["reset_time"]
                             data["messages_per_second"] = data["count"] / elapsed
                             data["count"] = 0
@@ -332,13 +349,20 @@ if __name__ == "__main__":
             for i, process_name in enumerate(processes):
                 x = x_offset + i * 200
                 y = y_offset
-                text = font.render(f"{process_name}", True, (0, 0, 0))
+                # Change color if the process is talking
+                talking_status = statuses[process_name]["talking"]["status"]
+                if talking_status == "on":
+                    color = (255, 0, 0)  # Red color when talking
+                else:
+                    color = (0, 0, 0)  # Black color when not talking
+                text = font.render(f"{process_name}", True, color)
                 screen.blit(text, (x, y))
                 y += 30
                 for activity in activities:
                     data = statuses[process_name][activity]
                     messages_per_second = data["messages_per_second"]
-                    display_text = f"{activity}: {messages_per_second:.2f} msg/s"
+                    activity_status = data["status"]
+                    display_text = f"{activity}: {activity_status}, {messages_per_second:.2f} msg/s"
                     text = font.render(display_text, True, (0, 0, 0))
                     screen.blit(text, (x, y))
                     y += 30
