@@ -73,6 +73,7 @@ class TalkingThread(threading.Thread):
         stop_event,
         process_name,
         mult,
+        shared_state,
     ):
         super().__init__()
         self.other_ear_conn = pipe
@@ -83,24 +84,83 @@ class TalkingThread(threading.Thread):
         self.mult = mult
         self.thinking_probability = 0.1
         self.talking_probability = 0.5
+        self.interrupt_probability = 0.3  # Probability to interrupt
+        self.process_name = process_name
+        self.shared_state = shared_state
+        self.min_talking_duration = 1  # Minimum talking duration in seconds
+        self.max_talking_duration = 5.0  # Maximum talking duration in seconds
 
     def run(self):
         while not self.stop_event.is_set():
             if random.random() < self.talking_probability:
-                self.talk("bla")
+                self.start_talking()
             try:
                 message = self.mouth_queue.get(timeout=1)
-                self.talk(message)
+                self.start_talking(message)
             except queue.Empty:
                 pass
 
-    def talk(self, message):
-        if random.random() < self.thinking_probability:
-            self_thought = f"Thought generated during talking"
-            self.brain_queue.put(self_thought)
-            self.logger.log_status("message_generated")
-        self.other_ear_conn.send(message)
-        self.logger.log_status("message_sent")
+    def start_talking(self, message="bla"):
+        other_process_name = (
+            "Process1" if self.process_name == "Process2" else "Process2"
+        )
+
+        # Before talking, check if the other process is talking
+        if self.shared_state.get(f"{other_process_name}_is_talking", False):
+            # Other process is talking
+            if random.random() < self.interrupt_probability:
+                # Decide to interrupt
+                pass  # Proceed to talk
+            else:
+                # Decide to yield
+                return
+        else:
+            # Other process is not talking
+            pass  # Proceed to talk
+
+        # Indicate that this process is talking
+        self.shared_state[f"{self.process_name}_is_talking"] = True
+
+        # Small delay to simulate potential collision
+        # time.sleep(0.0001)  # Sleep for 0.1 milliseconds
+
+        # After setting is_talking, check again if both are talking
+        if self.shared_state.get(f"{other_process_name}_is_talking", False):
+            # Both started talking at the same time
+            if random.random() < 0.5:
+                # This process yields
+                self.shared_state[f"{self.process_name}_is_talking"] = False
+                return
+            else:
+                # Other process may yield
+                pass
+
+        # Generate random talking duration
+        talking_duration = random.uniform(
+            self.min_talking_duration, self.max_talking_duration
+        )
+        start_time = time.time()
+
+        # Simulate talking by continuously sending messages for the duration
+        while time.time() - start_time < talking_duration:
+            if random.random() < self.thinking_probability:
+                self_thought = f"Thought generated during talking"
+                self.brain_queue.put(self_thought)
+                self.logger.log_status("message_generated")
+
+            # Send the message
+            self.other_ear_conn.send(message)
+            self.logger.log_status("message_sent")
+
+            # Optional: sleep briefly to prevent tight loop (simulate natural speaking rate)
+            # time.sleep(0.0001)  # Sleep for 0.1 seconds
+
+            # Check if stop_event is set to allow for graceful shutdown
+            if self.stop_event.is_set():
+                break
+
+        # Indicate that this process has finished talking
+        self.shared_state[f"{self.process_name}_is_talking"] = False
 
 
 class ListeningThread(threading.Thread):
@@ -113,6 +173,8 @@ class ListeningThread(threading.Thread):
         self.stop_event = stop_event
         self.brain_queue = brain_queue
         self.mult = mult
+        self.shared_state = None  # Will be set in process_function
+        self.process_name = process_name
 
     def run(self):
         while not self.stop_event.is_set():
@@ -123,9 +185,10 @@ class ListeningThread(threading.Thread):
             message = self.ear_conn.recv()
             self.brain_queue.put(message)
             self.logger.log_status("message_received")
+            # Optionally, handle any logic related to the shared state here
 
 
-def process_function(conn, other_conn, status_queue, process_name, mult):
+def process_function(conn, other_conn, status_queue, process_name, mult, shared_state):
     mouth_queue = queue.Queue()
     brain_queue = queue.Queue()
     stop_event = threading.Event()
@@ -134,11 +197,19 @@ def process_function(conn, other_conn, status_queue, process_name, mult):
         mouth_queue, status_queue, stop_event, brain_queue, process_name, mult
     )
     talker = TalkingThread(
-        conn, mouth_queue, brain_queue, status_queue, stop_event, process_name, mult
+        conn,
+        mouth_queue,
+        brain_queue,
+        status_queue,
+        stop_event,
+        process_name,
+        mult,
+        shared_state,
     )
     listener = ListeningThread(
         other_conn, status_queue, stop_event, brain_queue, process_name, mult
     )
+    listener.shared_state = shared_state  # Set shared_state for listener if needed
 
     thinker.start()
     talker.start()
@@ -155,16 +226,22 @@ if __name__ == "__main__":
     parent_conn2, child_conn2 = multiprocessing.Pipe()
     status_queue = multiprocessing.Queue()
 
+    # Create a multiprocessing Manager to hold shared state
+    manager = multiprocessing.Manager()
+    shared_state = manager.dict()
+    shared_state["Process1_is_talking"] = False
+    shared_state["Process2_is_talking"] = False
+
     process1 = multiprocessing.Process(
         target=process_function,
-        args=(parent_conn1, child_conn2, status_queue, "Process1", mult),
+        args=(parent_conn1, child_conn2, status_queue, "Process1", mult, shared_state),
         name="Process1",
     )
     process1.start()
 
     process2 = multiprocessing.Process(
         target=process_function,
-        args=(parent_conn2, child_conn1, status_queue, "Process2", mult),
+        args=(parent_conn2, child_conn1, status_queue, "Process2", mult, shared_state),
         name="Process2",
     )
     process2.start()
@@ -238,7 +315,7 @@ if __name__ == "__main__":
                         data["count"] += 1
                         data["last_update"] = now
 
-                        if now - data["reset_time"] >= 1.0:
+                        if now - data["reset_time"] >= .5:
                             elapsed = now - data["reset_time"]
                             data["messages_per_second"] = data["count"] / elapsed
                             data["count"] = 0
